@@ -204,47 +204,104 @@ const bar=document.getElementById('bar');
 addEventListener('scroll',()=>{const h=document.documentElement;const p=h.scrollTop/(h.scrollHeight-h.clientHeight||1);
   bar.style.width=(p*100)+'%'; if(h.scrollTop<10) cur.textContent='00';},{passive:true});
 
-/* ===== 背景音乐：Web Audio 合成舒缓 ambient（自包含，无需音频文件）===== */
+/* ===== 背景音乐：Web Audio 合成「氛围钢琴」（自包含，无需音频文件）=====
+   设计：缓慢的钢琴琶音(主旋律) + 柔和 pad 铺底 + 简易混响(反馈延迟)。
+   走 lo-fi/治愈风，慢速、温柔、留白多，适合静静看文案。 */
 const musicBtn=document.getElementById('music');
-let actx=null, master=null, playing=false, chordTimer=null;
-const PROG=[[220.00,261.63,329.63],[174.61,220.00,261.63],[196.00,246.94,293.66],[164.81,196.00,246.94]]; // Am F G Em 级缓行
-let pi=0;
+let actx=null, master=null, wet=null, playing=false, stepTimer=null, step=0;
+
+/* 和声进行：Am – Fmaj7 – C – G（经典抒情循环），每个和弦给一组可琶音的音高(Hz) */
+const A=220, C=261.63, E=329.63;
+const CH=[
+  {pad:[220.00,261.63,329.63],     arp:[440.00,523.25,659.25,523.25]},   // Am
+  {pad:[174.61,220.00,261.63,329.63],arp:[349.23,440.00,523.25,659.25]}, // Fmaj7
+  {pad:[261.63,329.63,392.00],     arp:[523.25,659.25,783.99,659.25]},   // C
+  {pad:[196.00,246.94,293.66],     arp:[392.00,493.88,587.33,493.88]},   // G
+];
+const STEP_MS=620;            // 每个琶音音符间隔（慢）
+const STEPS_PER_CHORD=8;      // 每个和弦持续 8 步
+
 function ensureCtx(){
   if(actx) return;
   const AC=window.AudioContext||window.webkitAudioContext;
   actx=new AC();
-  master=actx.createGain(); master.gain.value=0.0;
-  const lp=actx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=1200;
-  master.connect(lp); lp.connect(actx.destination);
+  master=actx.createGain(); master.gain.value=0;
+  // 整体低通，削掉刺耳高频，更柔
+  const lp=actx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=2600;
+  // 简易混响：延迟 + 反馈 + 高频衰减，制造空间感
+  const dl=actx.createDelay(); dl.delayTime.value=0.33;
+  const fb=actx.createGain(); fb.gain.value=0.34;
+  const damp=actx.createBiquadFilter(); damp.type='lowpass'; damp.frequency.value=2000;
+  wet=actx.createGain(); wet.gain.value=0.28;
+  dl.connect(damp); damp.connect(fb); fb.connect(dl);   // 反馈环
+  master.connect(lp);
+  lp.connect(actx.destination);                          // 干声
+  lp.connect(dl); dl.connect(wet); wet.connect(actx.destination); // 湿声(混响)
 }
-function playChord(freqs){
-  const t=actx.currentTime, dur=7;
+/* 钢琴式音符：多谐波正弦叠加 + 快起慢落包络，近似钢琴音色 */
+function note(freq,t,dur,vel){
+  const g=actx.createGain();
+  g.gain.setValueAtTime(0,t);
+  g.gain.linearRampToValueAtTime(vel,t+0.012);          // 快速起音(琴槌)
+  g.gain.exponentialRampToValueAtTime(Math.max(vel*0.25,0.0001),t+0.5);
+  g.gain.exponentialRampToValueAtTime(0.0001,t+dur);    // 长衰减
+  // 三个谐波让音色更像钢琴
+  [[1,1],[2,0.4],[3,0.16]].forEach(([mult,amp])=>{
+    const o=actx.createOscillator();
+    o.type='sine'; o.frequency.value=freq*mult;
+    const og=actx.createGain(); og.gain.value=amp;
+    o.connect(og); og.connect(g); o.start(t); o.stop(t+dur+0.05);
+  });
+  g.connect(master);
+}
+/* pad 铺底：长音三角波，慢起慢落 */
+function pad(freqs,t,dur){
   freqs.forEach((f,i)=>{
     const o=actx.createOscillator(), g=actx.createGain();
-    o.type=i===0?'sine':'triangle'; o.frequency.value=f;
-    o.detune.value=(i-1)*4; // 轻微离调，更柔
+    o.type='triangle'; o.frequency.value=f; o.detune.value=(i-1)*3;
     g.gain.setValueAtTime(0,t);
-    g.gain.linearRampToValueAtTime(0.16,t+2.2);   // 慢起
-    g.gain.linearRampToValueAtTime(0.0001,t+dur); // 慢落
-    o.connect(g); g.connect(master); o.start(t); o.stop(t+dur+.1);
+    g.gain.linearRampToValueAtTime(0.05,t+1.6);
+    g.gain.linearRampToValueAtTime(0.0001,t+dur);
+    o.connect(g); g.connect(master); o.start(t); o.stop(t+dur+0.1);
   });
 }
-function loopChords(){ playChord(PROG[pi%PROG.length]); pi++; }
+function tick(){
+  if(!actx) return;
+  const t=actx.currentTime+0.05;
+  const ci=Math.floor(step/STEPS_PER_CHORD)%CH.length;
+  const si=step%STEPS_PER_CHORD;
+  const chord=CH[ci];
+  if(si===0) pad(chord.pad,t,STEP_MS/1000*STEPS_PER_CHORD); // 每和弦起始铺 pad
+  // 琶音：在前 4 步走一遍 arp，后 4 步留白(更舒缓)
+  if(si<chord.arp.length){
+    const f=chord.arp[si];
+    note(f,t,2.4,si===0?0.22:0.16);
+    if(si===0) note(f/2,t,2.8,0.12); // 低八度加厚
+  }
+  step++;
+}
 function startMusic(){
   ensureCtx();
   if(actx.state==='suspended') actx.resume();
   master.gain.cancelScheduledValues(actx.currentTime);
-  master.gain.linearRampToValueAtTime(0.5,actx.currentTime+2);
-  loopChords(); chordTimer=setInterval(loopChords,6500);
+  master.gain.linearRampToValueAtTime(0.42,actx.currentTime+2.5); // 慢慢淡入
+  if(!stepTimer){ tick(); stepTimer=setInterval(tick,STEP_MS); }
   playing=true; musicBtn.classList.add('on');
 }
 function stopMusic(){
   if(!actx) return;
+  master.gain.cancelScheduledValues(actx.currentTime);
   master.gain.linearRampToValueAtTime(0.0001,actx.currentTime+1.2);
-  clearInterval(chordTimer); chordTimer=null;
+  clearInterval(stepTimer); stepTimer=null;
   playing=false; musicBtn.classList.remove('on');
 }
-musicBtn.addEventListener('click',()=>{ playing?stopMusic():startMusic(); });
+musicBtn.addEventListener('click',e=>{ e.stopPropagation(); playing?stopMusic():startMusic(); });
+
+/* 默认打开：浏览器禁止无交互自动播放，故在首次任意交互(点/触/滚/键)时自动开启一次 */
+let autoStarted=false;
+function autoStart(){ if(autoStarted) return; autoStarted=true; startMusic();
+  ['pointerdown','touchstart','keydown','wheel'].forEach(ev=>removeEventListener(ev,autoStart)); }
+['pointerdown','touchstart','keydown','wheel'].forEach(ev=>addEventListener(ev,autoStart,{passive:true,once:false}));
 </script>
 </body>
 </html>
