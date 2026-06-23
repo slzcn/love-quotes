@@ -297,13 +297,22 @@ function stopMusic(){
 }
 musicBtn.addEventListener('click',e=>{ e.stopPropagation(); playing?stopMusic():startMusic(); });
 
-/* 默认打开：浏览器禁止无交互自动播放，故在首次任意交互(点/触/滚/键)时自动开启一次 */
+/* 滑动/任意交互即触发音乐。
+   关键：scroll/wheel/touchmove 这类“滚动”手势不被浏览器当作有效的音频解锁手势，
+   在其中调 resume() 会被拒。所以策略是——每次交互都尝试 startMusic()，
+   只有确认 AudioContext 真的 running 了才算成功、才移除监听；没成功就保留监听等下一次手势继续试。
+   实际效果：手指一滑(touchstart 紧随 touchmove)或鼠标一动即解锁，无需专门去点按钮。 */
+const AUTO_EVENTS=['touchstart','pointerdown','mousedown','keydown','touchmove','wheel','scroll','click'];
 let autoStarted=false;
-function autoStart(){ if(autoStarted) return; autoStarted=true; startMusic();
-  ['scroll','wheel','touchmove','pointerdown','touchstart','keydown'].forEach(ev=>removeEventListener(ev,autoStart)); }
-/* 滑动即触发：滚动(scroll)、滚轮(wheel)、触屏拖动(touchmove)都算，外加点/触/键兜底。
-   注：浏览器禁止无交互自动播放，所以必须挂在用户首次交互上；scroll 正是“滑动”最直接的信号。 */
-['scroll','wheel','touchmove','pointerdown','touchstart','keydown'].forEach(ev=>addEventListener(ev,autoStart,{passive:true}));
+function autoStart(){
+  if(autoStarted) return;
+  startMusic();
+  if(actx && actx.state==='running'){      // 仅当音频确实解锁运行，才停止监听
+    autoStarted=true;
+    AUTO_EVENTS.forEach(ev=>removeEventListener(ev,autoStart));
+  }
+}
+AUTO_EVENTS.forEach(ev=>addEventListener(ev,autoStart,{passive:true}));
 </script>
 </body>
 </html>
